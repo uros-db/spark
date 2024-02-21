@@ -322,6 +322,106 @@ class StringExpressionsSuite extends SparkFunSuite with ExpressionEvalHelper {
     checkEvaluation(c1 contains Collate("Ć", "SR_CI_AI"), true, row)
     checkEvaluation(c1 contains Collate("C", "SR_CI_AS"), true, row)
     checkEvaluation(c1 contains Collate("c", "SR_CS_AS"), true, row)
+
+    checkEvaluation(c1 startsWith "a", true, row)
+    checkEvaluation(c1 startsWith Collate("A", "UCS_BASIC"), false, row)
+    checkEvaluation(c1 startsWith Collate("A", "UCS_BASIC_LCASE"), true, row)
+    checkEvaluation(c1 startsWith Collate("A", "UNICODE_CI"), true, row)
+    checkEvaluation(c1 startsWith Collate("Ä", "DE_CI_AI"), true, row)
+    checkEvaluation(c1 startsWith Collate("A", "DE_CI_AS"), true, row)
+    checkEvaluation(c1 startsWith Collate("a", "DE_CS_AS"), true, row)
+  }
+
+  test("Support startsWith string expression with Collation") {
+    // Test 'startsWith' with different collations
+
+    // UCS_BASIC (default)
+    checkEvaluation(StartsWith(Literal(""), Literal("")), true)
+    checkEvaluation(StartsWith(Literal(""), Literal("c")), false)
+    checkEvaluation(StartsWith(Literal("c"), Literal("")), true)
+    checkEvaluation(StartsWith(Literal("c"), Literal("c")), true)
+    checkEvaluation(StartsWith(Literal("cde"), Literal("c")), true)
+    checkEvaluation(StartsWith(Literal("abc"), Literal("c")), false)
+    checkEvaluation(StartsWith(Literal("abde"), Literal("c")), false)
+    checkEvaluation(StartsWith(Literal("abcde"), Literal("c")), false)
+
+    // UCS_BASIC vs. UCS_BASIC_LCASE vs. UNICODE_CI
+    checkEvaluation(StartsWith(Collate("cde", "UCS_BASIC"), Literal("c")), true)
+    checkEvaluation(StartsWith(Collate("cde", "UCS_BASIC"), Literal("C")), false)
+    checkEvaluation(StartsWith(Collate("Cde", "UCS_BASIC"), Literal("c")), false)
+    checkEvaluation(StartsWith(Collate("Cde", "UCS_BASIC"), Literal("C")), true)
+    checkEvaluation(StartsWith(Collate("cde", "UCS_BASIC_LCASE"), Literal("c")), true)
+    checkEvaluation(StartsWith(Collate("cde", "UCS_BASIC_LCASE"), Literal("C")), true)
+    checkEvaluation(StartsWith(Collate("Cde", "UCS_BASIC_LCASE"), Literal("c")), true)
+    checkEvaluation(StartsWith(Collate("Cde", "UCS_BASIC_LCASE"), Literal("C")), true)
+    checkEvaluation(StartsWith(Collate("cde", "UNICODE_CI"), Literal("c")), true)
+    checkEvaluation(StartsWith(Collate("cde", "UNICODE_CI"), Literal("C")), true)
+    checkEvaluation(StartsWith(Collate("Cde", "UNICODE_CI"), Literal("c")), true)
+    checkEvaluation(StartsWith(Collate("Cde", "UNICODE_CI"), Literal("C")), true)
+
+    // Serbian language collation tests (should also work for all the other collators with ID >= 4)
+    val list_left: List[String] = List("cde", "Cde", "ćde", "Ćde")
+    val list_right: List[String] = List("c", "C", "ć", "Ć")
+    var list_result: List[Boolean] = List()
+
+    // SR_CI_AI
+    list_result = List(
+      //  c     C      ć      Ć
+      true, true, true, true, // cde
+      true, true, true, true, // Cde
+      true, true, true, true, // ćde
+      true, true, true, true) // Ćde
+    for {
+      (left, index_left) <- list_left.zipWithIndex
+      (right, index_right) <- list_right.zipWithIndex
+    } {
+      val expected_result = list_result(index_left * list_right.length + index_right)
+      checkEvaluation(StartsWith(Collate(left, "SR_CI_AI"), Literal(right)), expected_result)
+      checkEvaluation(StartsWith(Literal(left), Collate(right, "SR_CI_AI")), expected_result)
+      checkEvaluation(StartsWith(Collate(left, "SR_CI_AI"), Collate(right, "SR_CI_AI")),
+        expected_result)
+      // codegen off
+      val l: UTF8String = UTF8String.fromString(left)
+      val r: UTF8String = UTF8String.fromString(right)
+      checkEvaluation(StartsWith(Literal(left), Collate(right, "SR_CI_AI")).compare(l, r),
+        expected_result)
+    }
+
+    // SR_CI_AS
+    list_result = List(
+      //  c     C      ć      Ć
+      true, true, false, false, // cde
+      true, true, false, false, // Cde
+      false, false, true, true, // ćde
+      false, false, true, true) // Ćde
+    for {
+      (left, index_left) <- list_left.zipWithIndex
+      (right, index_right) <- list_right.zipWithIndex
+    } {
+      val expected_result = list_result(index_left * list_right.length + index_right)
+      checkEvaluation(StartsWith(Collate(left, "SR_CI_AS"), Literal(right)), expected_result)
+      checkEvaluation(StartsWith(Literal(left), Collate(right, "SR_CI_AS")), expected_result)
+      checkEvaluation(StartsWith(Collate(left, "SR_CI_AS"), Collate(right, "SR_CI_AS")),
+        expected_result)
+    }
+
+    // SR_CS_AS
+    list_result = List(
+      //  c     C      ć      Ć
+      true, false, false, false, // cde
+      false, true, false, false, // Cde
+      false, false, true, false, // ćde
+      false, false, false, true) // Ćde
+    for {
+      (left, index_left) <- list_left.zipWithIndex
+      (right, index_right) <- list_right.zipWithIndex
+    } {
+      val expected_result = list_result(index_left * list_right.length + index_right)
+      checkEvaluation(StartsWith(Collate(left, "SR_CS_AS"), Literal(right)), expected_result)
+      checkEvaluation(StartsWith(Literal(left), Collate(right, "SR_CS_AS")), expected_result)
+      checkEvaluation(StartsWith(Collate(left, "SR_CS_AS"), Collate(right, "SR_CS_AS")),
+        expected_result)
+    }
   }
 
   test("Substring") {

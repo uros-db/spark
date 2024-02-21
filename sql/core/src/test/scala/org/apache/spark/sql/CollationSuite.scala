@@ -630,4 +630,166 @@ class CollationSuite extends QueryTest
     }
   }
 
+  test("Support startsWith string expression with Collation") {
+    // Test 'startsWith' with different collations
+    var listLeft: List[String] = List()
+    var listRight: List[String] = List()
+    var listResult: List[Boolean] = List()
+
+    // UCS_BASIC (default)
+    listLeft = List("", "c", "abc", "cde", "abde", "abcde", "C", "ABC", "CDE", "ABDE", "ABCDE")
+    listRight = List("", "c", "abc", "cde", "abde", "abcde", "C", "ABC", "CDE", "ABDE", "ABCDE")
+    listResult = List(
+    //  ""     c     abc    cde   abde  abcde    C     ABC    CDE    ABDE  ABCDE
+      true, false, false, false, false, false, false, false, false, false, false, //  ""
+      true, true, false, false, false, false, false, false, false, false, false,  //   c
+      true, false, true, false, false, false, false, false, false, false, false,  // abc
+      true, true, false, true, false, false, false, false, false, false, false,   //   cde
+      true, false, false, false, true, false, false, false, false, false, false,  // abde
+      true, false, true, false, false, true, false, false, false, false, false,   // abcde
+      true, false, false, false, false, false, true, false, false, false, false,  //   C
+      true, false, false, false, false, false, false, true, false, false, false,  // ABC
+      true, false, false, false, false, false, true, false, true, false, false,   //   CDE
+      true, false, false, false, false, false, false, false, false, true, false,  // ABDE
+      true, false, false, false, false, false, false, true, false, false, true)   // ABCDE
+    for {
+      (left, index_left) <- listLeft.zipWithIndex
+      (right, index_right) <- listRight.zipWithIndex
+    } {
+      val expectedAnswer = listResult(index_left * listRight.length + index_right)
+      checkAnswer(sql("SELECT startswith('" + left + "', '" + right + "')"), Row(expectedAnswer))
+      checkAnswer(sql("SELECT startswith('" + left + "', collate('" +
+        right + "', 'UCS_BASIC'))"), Row(expectedAnswer))
+      checkAnswer(sql("SELECT startswith(collate('" + left + "', 'UCS_BASIC'), '" +
+        right + "')"), Row(expectedAnswer))
+      checkAnswer(sql("SELECT startswith(collate('" + left + "', 'UCS_BASIC'), collate('" +
+        right + "', 'UCS_BASIC'))"), Row(expectedAnswer))
+    }
+
+    // UCS_BASIC_LCASE
+    listResult = List(
+    //  ""     c     abc    cde   abde  abcde    C     ABC    CDE    ABDE  ABCDE
+      true, false, false, false, false, false, false, false, false, false, false, //  ""
+      true, true, false, false, false, false, true, false, false, false, false,   //   c
+      true, false, true, false, false, false, false, true, false, false, false,   // abc
+      true, true, false, true, false, false, true, false, true, false, false,     //   cde
+      true, false, false, false, true, false, false, false, false, true, false,   // abde
+      true, false, true, false, false, true, false, true, false, false, true,     // abcde
+      true, true, false, false, false, false, true, false, false, false, false,   //   C
+      true, false, true, false, false, false, false, true, false, false, false,   // ABC
+      true, true, false, true, false, false, true, false, true, false, false,     //   CDE
+      true, false, false, false, true, false, false, false, false, true, false,   // ABDE
+      true, false, true, false, false, true, false, true, false, false, true)     // ABCDE
+    for {
+      (left, index_left) <- listLeft.zipWithIndex
+      (right, index_right) <- listRight.zipWithIndex
+    } {
+      val expectedAnswer = listResult(index_left * listRight.length + index_right)
+      checkAnswer(sql("SELECT startswith('" + left + "', collate('" +
+        right + "', 'UCS_BASIC_LCASE'))"), Row(expectedAnswer))
+      checkAnswer(sql("SELECT startswith(collate('" + left + "', 'UCS_BASIC_LCASE'), '" +
+        right + "')"), Row(expectedAnswer))
+      checkAnswer(sql("SELECT startswith(collate('" + left + "', 'UCS_BASIC_LCASE'), collate('" +
+        right + "', 'UCS_BASIC_LCASE'))"), Row(expectedAnswer))
+    }
+
+    // Serbian language collation tests (should also work for all the other collators with ID >= 4)
+    listLeft = List("cde", "Cde", "ćde", "Ćde")
+    listRight = List("c", "C", "ć", "Ć")
+    val listResultNoCollation = List(
+      //  c     C      ć      Ć
+      true, false, false, false, // cde
+      false, true, false, false, // Cde
+      false, false, true, false, // ćde
+      false, false, false, true) // Ćde
+
+    // UNICODE_CI
+    listResult = List(
+      //  c     C      ć      Ć
+      true, true, false, false, // cde
+      true, true, false, false, // Cde
+      false, false, true, true, // ćde
+      false, false, true, true) // Ćde
+    for {
+      (left, index_left) <- listLeft.zipWithIndex
+      (right, index_right) <- listRight.zipWithIndex
+    } {
+      // without collation
+      var expectedAnswer = listResultNoCollation(index_left * listRight.length + index_right)
+      checkAnswer(sql("SELECT startswith('" + left + "', '" + right + "')"),
+        Row(expectedAnswer))
+      // with collation
+      expectedAnswer = listResult(index_left * listRight.length + index_right)
+      checkAnswer(sql("SELECT startswith('" + left + "', collate('" +
+        right + "', 'UNICODE_CI'))"), Row(expectedAnswer))
+      checkAnswer(sql("SELECT startswith(collate('" + left + "', 'UNICODE_CI'), '" +
+        right + "')"), Row(expectedAnswer))
+      checkAnswer(sql("SELECT startswith(collate('" + left + "', 'UNICODE_CI'), collate('" +
+        right + "', 'UNICODE_CI'))"), Row(expectedAnswer))
+    }
+
+    // SR_CI_AI
+    listResult = List(
+      //  c     C      ć      Ć
+      true, true, true, true, // cde
+      true, true, true, true, // Cde
+      true, true, true, true, // ćde
+      true, true, true, true) // Ćde
+    for {
+      (left, index_left) <- listLeft.zipWithIndex
+      (right, index_right) <- listRight.zipWithIndex
+    } {
+      // with collation
+      val expectedAnswer = listResult(index_left * listRight.length + index_right)
+      checkAnswer(sql("SELECT startswith('" + left + "', collate('" +
+        right + "', 'SR_CI_AI'))"), Row(expectedAnswer))
+      checkAnswer(sql("SELECT startswith(collate('" + left + "', 'SR_CI_AI'), '" +
+        right + "')"), Row(expectedAnswer))
+      checkAnswer(sql("SELECT startswith(collate('" + left + "', 'SR_CI_AI'), collate('" +
+        right + "', 'SR_CI_AI'))"), Row(expectedAnswer))
+    }
+
+    // SR_CI_AS
+    listResult = List(
+      //  c     C      ć      Ć
+      true, true, false, false, // cde
+      true, true, false, false, // Cde
+      false, false, true, true, // ćde
+      false, false, true, true) // Ćde
+    for {
+      (left, index_left) <- listLeft.zipWithIndex
+      (right, index_right) <- listRight.zipWithIndex
+    } {
+      // with collation
+      val expectedAnswer = listResult(index_left * listRight.length + index_right)
+      checkAnswer(sql("SELECT startswith('" + left + "', collate('" +
+        right + "', 'SR_CI_AS'))"), Row(expectedAnswer))
+      checkAnswer(sql("SELECT startswith(collate('" + left + "', 'SR_CI_AS'), '" +
+        right + "')"), Row(expectedAnswer))
+      checkAnswer(sql("SELECT startswith(collate('" + left + "', 'SR_CI_AS'), collate('" +
+        right + "', 'SR_CI_AS'))"), Row(expectedAnswer))
+    }
+
+    // SR_CS_AS
+    listResult = List(
+      //  c     C      ć      Ć
+      true, false, false, false, // cde
+      false, true, false, false, // Cde
+      false, false, true, false, // ćde
+      false, false, false, true) // Ćde
+    for {
+      (left, index_left) <- listLeft.zipWithIndex
+      (right, index_right) <- listRight.zipWithIndex
+    } {
+      // with collation
+      val expectedAnswer = listResult(index_left * listRight.length + index_right)
+      checkAnswer(sql("SELECT startswith('" + left + "', collate('" +
+        right + "', 'SR_CS_AS'))"), Row(expectedAnswer))
+      checkAnswer(sql("SELECT startswith(collate('" + left + "', 'SR_CS_AS'), '" +
+        right + "')"), Row(expectedAnswer))
+      checkAnswer(sql("SELECT startswith(collate('" + left + "', 'SR_CS_AS'), collate('" +
+        right + "', 'SR_CS_AS'))"), Row(expectedAnswer))
+    }
+  }
+
 }
