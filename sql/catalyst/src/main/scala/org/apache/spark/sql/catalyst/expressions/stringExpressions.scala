@@ -898,9 +898,119 @@ object EndsWithExpressionBuilder extends StringBinaryPredicateExpressionBuilderB
 }
 
 case class EndsWith(left: Expression, right: Expression) extends StringPredicate {
-  override def compare(l: UTF8String, r: UTF8String): Boolean = l.endsWith(r)
+  override def inputTypes: Seq[DataType] = {
+    // TODO: properly handle String Types with differing collations
+    val leftIsString = left.dataType.getClass.getName.startsWith(
+      "org.apache.spark.sql.types.StringType")
+    val rightIsString = right.dataType.getClass.getName.startsWith(
+      "org.apache.spark.sql.types.StringType")
+    if (leftIsString && rightIsString) {
+      Seq(left.dataType, right.dataType)
+    } else {
+      Seq(StringType, StringType)
+    }
+  }
+  override def compare(l: UTF8String, r: UTF8String): Boolean = {
+    val lCollationID = left.dataType.asInstanceOf[StringType].collationId
+    val rCollationID = right.dataType.asInstanceOf[StringType].collationId
+    // TODO: ensure that lCollationID and rCollationID are equal (compatible)
+    val collationID = if (lCollationID > rCollationID) lCollationID else rCollationID
+    val collatorInfo = CollatorFactory.getInfoForId(collationID)
+    val collator = collatorInfo.collator
+    collator match {
+      // UTF8String collation
+      case null =>
+        collationID match {
+          // UCS_BASIC
+          case 0 =>
+            l.endsWith(r)
+          // UCS_BASIC_LCASE
+          case 1 =>
+            // scalastyle:off caselocale
+            l.toLowerCase.endsWith(r.toLowerCase)
+          // scalastyle:on caselocale
+          // Other special collations without ICU collator
+          case _ =>
+            val lLen = l.numBytes()
+            val rLen = r.numBytes()
+            lLen >= rLen &&
+              collatorInfo.comparator.compare(l.substring(lLen - rLen, lLen), r) == 0
+        }
+      // String ICU collation
+      case _ =>
+        val lStr: String = l.toString
+        val rStr: String = r.toString
+        lStr.length >= rStr.length &&
+          collator.compare(lStr.substring(lStr.length - rStr.length, lStr.length), rStr) == 0
+    }
+  }
   override def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode = {
-    defineCodeGen(ctx, ev, (c1, c2) => s"($c1).endsWith($c2)")
+    val lCollationID = left.dataType.asInstanceOf[StringType].collationId
+    val rCollationID = right.dataType.asInstanceOf[StringType].collationId
+    // TODO: ensure that lCollationID and rCollationID are equal (compatible)
+    val collationID = if (lCollationID > rCollationID) lCollationID else rCollationID
+    val collatorFactory = ctx.addReferenceObj("collatorFactory", CollatorFactory.getInstance())
+    val collatorInfo = CollatorFactory.getInfoForId(collationID)
+    val collator = collatorInfo.collator
+    val leftGen = if (left.dataType.sameType(StringType)) {
+      left.genCode(ctx)
+    } else {
+      left.asInstanceOf[Collate].inputString.genCode(ctx)
+    }
+    val rightGen = if (right.dataType.sameType(StringType)) {
+      right.genCode(ctx)
+    } else {
+      right.asInstanceOf[Collate].inputString.genCode(ctx)
+    }
+    collator match {
+      case null =>
+        collationID match {
+          case 0 =>
+            // UCS_BASIC
+            defineCodeGen(ctx, ev, (c1, c2) => s"($c1).endsWith($c2)")
+          case 1 =>
+            // UCS_BASIC_LCASE
+            defineCodeGen(ctx, ev, (c1, c2) => s"($c1.toLowerCase()).endsWith($c2.toLowerCase())")
+          case _ =>
+            // Other special collations without ICU collator
+            val resultCode =
+              s"""
+                 |org.apache.spark.sql.catalyst.util.CollatorFactory.CollatorInfo collatorInfo =
+                 |$collatorFactory.getInfoForId(collID);
+                 |int lLen = ${leftGen.value}.toString().length();
+                 |int rLen = ${rightGen.value}.toString().length();
+                 |result = lLen >= rLen && collatorInfo.comparator.compare(
+                 |    ${leftGen.value}.substring(lLen - rLen, lLen), ${rightGen.value}) == 0;
+                 |""".stripMargin
+            ev.copy(code =
+              code"""
+                    |${leftGen.code}
+                    |${rightGen.code}
+                    |boolean ${ev.isNull} = false;
+                    |$resultCode
+                    |boolean ${ev.value} = result;
+                    |""".stripMargin)
+        }
+      case _ =>
+        val resultCode =
+          s"""
+             |org.apache.spark.sql.catalyst.util.CollatorFactory.CollatorInfo collatorInfo =
+             |$collatorFactory.getInfoForId(${collationID});
+             |com.ibm.icu.text.Collator collator = collatorInfo.collator;
+             |String lStr = ${leftGen.value}.toString();
+             |String rStr = ${rightGen.value}.toString();
+             |boolean result = lStr.length() >= rStr.length() && collator.compare(
+             |  lStr.substring(lStr.length() - rStr.length(), lStr.length()), rStr) == 0;
+             |""".stripMargin
+        ev.copy(code =
+          code"""
+                |${leftGen.code}
+                |${rightGen.code}
+                |boolean ${ev.isNull} = false;
+                |$resultCode
+                |boolean ${ev.value} = result;
+                |""".stripMargin)
+    }
   }
   override protected def withNewChildrenInternal(
     newLeft: Expression, newRight: Expression): EndsWith = copy(left = newLeft, right = newRight)
