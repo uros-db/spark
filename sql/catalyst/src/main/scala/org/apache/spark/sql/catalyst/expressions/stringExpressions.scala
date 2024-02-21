@@ -21,9 +21,7 @@ import java.io.UnsupportedEncodingException
 import java.text.{BreakIterator, DecimalFormat, DecimalFormatSymbols}
 import java.util.{Base64 => JBase64}
 import java.util.{HashMap, Locale, Map => JMap}
-
 import scala.collection.mutable.ArrayBuffer
-
 import org.apache.spark.QueryContext
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.{ExpressionBuilder, FunctionRegistry, TypeCheckResult}
@@ -34,7 +32,7 @@ import org.apache.spark.sql.catalyst.expressions.codegen.Block._
 import org.apache.spark.sql.catalyst.expressions.objects.StaticInvoke
 import org.apache.spark.sql.catalyst.trees.BinaryLike
 import org.apache.spark.sql.catalyst.trees.TreePattern.{TreePattern, UPPER_OR_LOWER}
-import org.apache.spark.sql.catalyst.util.{ArrayData, GenericArrayData, TypeUtils}
+import org.apache.spark.sql.catalyst.util.{ArrayData, CollatorFactory, GenericArrayData, TypeUtils}
 import org.apache.spark.sql.errors.{QueryCompilationErrors, QueryExecutionErrors}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
@@ -586,9 +584,139 @@ object ContainsExpressionBuilder extends StringBinaryPredicateExpressionBuilderB
 }
 
 case class Contains(left: Expression, right: Expression) extends StringPredicate {
-  override def compare(l: UTF8String, r: UTF8String): Boolean = l.contains(r)
+  override def inputTypes: Seq[DataType] = {
+    // TODO: properly handle String Types with differing collations
+    val leftIsString = left.dataType.getClass.getName.startsWith(
+      "org.apache.spark.sql.types.StringType")
+    val rightIsString = right.dataType.getClass.getName.startsWith(
+      "org.apache.spark.sql.types.StringType")
+    if (leftIsString && rightIsString) {
+      Seq(left.dataType, right.dataType)
+    } else {
+      Seq(StringType, StringType)
+    }
+  }
+
+  override def compare(l: UTF8String, r: UTF8String): Boolean = {
+    val lCollationID = left.dataType.asInstanceOf[StringType].collationId
+    val rCollationID = right.dataType.asInstanceOf[StringType].collationId
+    // TODO: ensure that lCollationID and rCollationID are equal (compatible)
+    val collationID = if (lCollationID > rCollationID) lCollationID else rCollationID
+    val collatorInfo = CollatorFactory.getInfoForId(collationID)
+    val collator = collatorInfo.collator
+    collator match {
+      // UTF8String collation
+      case null =>
+        collationID match {
+          // UCS_BASIC
+          case 0 =>
+            l.contains(r)
+          // UCS_BASIC_LCASE
+          case 1 =>
+            // scalastyle:off caselocale
+            l.toLowerCase.contains(r.toLowerCase)
+          // scalastyle:on caselocale
+          // Other special collations without ICU collator
+          case _ =>
+            var found = false
+            for (i <- 0 to l.numBytes() - r.numBytes() if !found) {
+              if (collatorInfo.comparator.compare(l.substring(i, i + r.numBytes()), r) == 0) {
+                found = true
+              }
+            }
+            found
+        }
+      // String ICU collation
+      case _ =>
+        val lStr: String = l.toString
+        val rStr: String = r.toString
+        var found = false
+        for (i <- 0 to lStr.length - rStr.length if !found) {
+          if (collator.compare(lStr.substring(i, i + rStr.length), rStr) == 0) {
+            found = true
+          }
+        }
+        found
+    }
+  }
   override def doGenCode(ctx: CodegenContext, ev: ExprCode): ExprCode = {
-    defineCodeGen(ctx, ev, (c1, c2) => s"($c1).contains($c2)")
+    val lCollationID = left.dataType.asInstanceOf[StringType].collationId
+    val rCollationID = right.dataType.asInstanceOf[StringType].collationId
+    // TODO: ensure that lCollationID and rCollationID are equal (compatible)
+    val collationID = if (lCollationID > rCollationID) lCollationID else rCollationID
+    val collatorFactory = ctx.addReferenceObj("collatorFactory", CollatorFactory.getInstance())
+    val collatorInfo = CollatorFactory.getInfoForId(collationID)
+    val collator = collatorInfo.collator
+    val leftGen = if (left.dataType.sameType(StringType)) {
+      left.genCode(ctx)
+    } else {
+      left.asInstanceOf[Collate].inputString.genCode(ctx)
+    }
+    val rightGen = if (right.dataType.sameType(StringType)) {
+      right.genCode(ctx)
+    } else {
+      right.asInstanceOf[Collate].inputString.genCode(ctx)
+    }
+    collator match {
+      case null =>
+        collationID match {
+          case 0 =>
+            // UCS_BASIC
+            defineCodeGen(ctx, ev, (c1, c2) => s"($c1).contains($c2)")
+          case 1 =>
+            // UCS_BASIC_LCASE
+            defineCodeGen(ctx, ev, (c1, c2) => s"($c1.toLowerCase()).contains($c2.toLowerCase())")
+          case _ =>
+            // Other special collations without ICU collator
+            val resultCode =
+              s"""
+                 |${leftGen.code}
+                 |${rightGen.code}
+                 |org.apache.spark.sql.catalyst.util.CollatorFactory.CollatorInfo collatorInfo =
+                 |$collatorFactory.getInfoForId(collID);
+                 |int lLen = ${leftGen.value}.toString().length();
+                 |int rLen = ${rightGen.value}.toString().length();
+                 |boolean result = false;
+                 |for (int i = 0; i <= lLen - rLen && !result; i++) {
+                 |  if (collatorInfo.comparator.compare(${leftGen.value}.substring(i, i + rLen),
+                 |  ${rightGen.value}) == 0) {
+                 |    result = true;
+                 |  }
+                 |}
+                 |""".stripMargin
+            ev.copy(code =
+              code"""
+                    |${leftGen.code}
+                    |${rightGen.code}
+                    |boolean ${ev.isNull} = false;
+                    |$resultCode
+                    |boolean ${ev.value} = result;
+                    |""".stripMargin)
+        }
+      case _ =>
+        val resultCode =
+          s"""
+             |org.apache.spark.sql.catalyst.util.CollatorFactory.CollatorInfo collatorInfo =
+             |$collatorFactory.getInfoForId(${collationID});
+             |com.ibm.icu.text.Collator collator = collatorInfo.collator;
+             |String l = ${leftGen.value}.toString();
+             |String r = ${rightGen.value}.toString();
+             |boolean result = false;
+             |for (int l_start = 0; l_start <= l.length() - r.length() && !result; l_start++) {
+             |  if (collator.compare(l.substring(l_start, l_start + r.length()), r) == 0) {
+             |    result = true;
+             |  }
+             |}
+             |""".stripMargin
+        ev.copy(code =
+          code"""
+                |${leftGen.code}
+                |${rightGen.code}
+                |boolean ${ev.isNull} = false;
+                |$resultCode
+                |boolean ${ev.value} = result;
+                |""".stripMargin)
+    }
   }
   override protected def withNewChildrenInternal(
     newLeft: Expression, newRight: Expression): Contains = copy(left = newLeft, right = newRight)
